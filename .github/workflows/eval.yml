@@ -1,0 +1,93 @@
+name: eval
+
+on:
+  pull_request:
+    paths:
+      - "methods/**"
+      - "eval/**"
+      - ".github/workflows/eval.yml"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      experiment_name:
+        description: "Experiment run name (default: commit SHA)"
+        required: false
+
+jobs:
+  answer_from_documents:
+    runs-on: ubuntu-latest
+    env:
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_HOST:       ${{ secrets.LANGFUSE_HOST }}
+      PIPELEX_GATEWAY_API_KEY: ${{ secrets.PIPELEX_GATEWAY_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install mthds-agent CLI
+        run: npm install -g mthds
+
+      - name: Install deps (via make → uv)
+        run: make install
+
+      - name: Configure Pipelex → Langfuse telemetry
+        run: |
+          mkdir -p ~/.pipelex
+          cat > ~/.pipelex/telemetry.toml <<EOF
+          [langfuse]
+          enabled    = true
+          public_key = "${LANGFUSE_PUBLIC_KEY}"
+          secret_key = "${LANGFUSE_SECRET_KEY}"
+          endpoint   = "${LANGFUSE_HOST:-https://cloud.langfuse.com}"
+          EOF
+
+      - name: Determine experiment name
+        id: expname
+        run: |
+          if [ -n "${{ inputs.experiment_name }}" ]; then
+            echo "name=${{ inputs.experiment_name }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "name=pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run experiment
+        run: |
+          make run-experiment \
+            BUNDLE=methods/answer_from_documents \
+            DATASET=mmlongbench-sample-v1 \
+            EXPERIMENT="${{ steps.expname.outputs.name }}" \
+            FAIL_BELOW=0.80
+
+      - name: Post experiment URL as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const exp = "${{ steps.expname.outputs.name }}";
+            const host = process.env.LANGFUSE_HOST || "https://cloud.langfuse.com";
+            const body = [
+              "**Eval results**",
+              "",
+              `Experiment: \`${exp}\``,
+              `Dataset: \`mmlongbench-sample-v1\``,
+              `See full scorecard → ${host} → Datasets → mmlongbench-sample-v1 → Runs → ${exp}`,
+            ].join("\n");
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.issue.number,
+              body,
+            });

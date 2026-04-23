@@ -1,0 +1,248 @@
+"""Scorers: deterministic graders that run on each item's output during an experiment.
+
+A scorer implements `.score(...)` and returns a `ScoreResult`. The runner wraps it
+into a Langfuse `Evaluation`.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from math import isclose
+from typing import Any, Protocol, runtime_checkable
+
+
+@dataclass
+class ScoreResult:
+    name: str
+    value: float | str
+    comment: str | None = None
+    data_type: str = "NUMERIC"  # NUMERIC | CATEGORICAL | BOOLEAN
+
+
+@runtime_checkable
+class Scorer(Protocol):
+    name: str
+
+    def score(
+        self,
+        *,
+        output: dict[str, Any],
+        expected_output: dict[str, Any],
+        input: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> ScoreResult: ...
+
+
+# ---------------------------------------------------------------------------
+# ExactMatchScorer — byte-level equality (strict regression gate)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_list_string(s: str) -> list[str] | None:
+    try:
+        parsed = json.loads(s)
+    except Exception:
+        return None
+    if isinstance(parsed, list):
+        return sorted(str(x).strip().lower() for x in parsed)
+    return None
+
+
+def exact_match(got: str, expected: str) -> bool:
+    got = (got or "").strip()
+    expected = (expected or "").strip()
+    got_list = _normalize_list_string(got)
+    exp_list = _normalize_list_string(expected)
+    if got_list is not None and exp_list is not None:
+        return got_list == exp_list
+    return got.lower().rstrip(".") == expected.lower().rstrip(".")
+
+
+class ExactMatchScorer:
+    name = "exact_match"
+
+    def score(
+        self,
+        *,
+        output: dict[str, Any],
+        expected_output: dict[str, Any],
+        input: dict[str, Any],  # noqa: A002, ARG002
+        metadata: dict[str, Any],  # noqa: ARG002
+    ) -> ScoreResult:
+        got = str((output or {}).get("answer", ""))
+        expected = str((expected_output or {}).get("answer", ""))
+        return ScoreResult(
+            name=self.name,
+            value=1.0 if exact_match(got, expected) else 0.0,
+            comment=f"got={got!r} expected={expected!r}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# MMLongBenchOfficialScorer — verbatim port of MMLongBench-Doc's eval_score.py
+# (NeurIPS 2024). Preserved algorithmically so scores are leaderboard-comparable.
+#   Upstream: https://github.com/mayubo2333/MMLongBench-Doc/blob/main/eval/eval_score.py
+# ---------------------------------------------------------------------------
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    if len(s1) > len(s2):
+        s1, s2 = s2, s1
+    distances = list(range(len(s1) + 1))
+    for index2, char2 in enumerate(s2):
+        distances_ = [index2 + 1]
+        for index1, char1 in enumerate(s1):
+            if char1 == char2:
+                distances_.append(distances[index1])
+            else:
+                distances_.append(1 + min((distances[index1], distances[index1 + 1], distances_[-1])))
+        distances = distances_
+    return distances[-1]
+
+
+def _anls_compute(groundtruth: str, prediction: str, threshold: float = 0.5) -> float:
+    dist = _levenshtein_distance(groundtruth, prediction)
+    length = max(len(groundtruth.upper()), len(prediction.upper()))
+    value = 0.0 if length == 0 else float(dist) / float(length)
+    anls = 1.0 - value
+    if anls <= threshold:
+        anls = 0.0
+    return anls
+
+
+def _is_float_equal(
+    reference: float | str,
+    prediction: float | str,
+    include_percentage: bool = False,
+    is_close: bool = False,
+) -> bool:
+    def _get_precision(gt_ans: float) -> int:
+        return len(str(gt_ans).split(".")[-1]) if "." in str(gt_ans) else 3
+
+    reference = float(str(reference).strip().rstrip("%").strip())
+    try:
+        prediction = float(str(prediction).strip().rstrip("%").strip())
+    except Exception:
+        return False
+
+    candidates = [reference / 100, reference, reference * 100] if include_percentage else [reference]
+    for item in candidates:
+        try:
+            if is_close and isclose(item, prediction, rel_tol=0.01):
+                return True
+            precision = max(min(_get_precision(prediction), _get_precision(item)), 2)
+            if round(prediction, precision) == round(item, precision):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _get_clean_string(s: Any) -> str:
+    s = str(s).lower().strip()
+    # Upstream applies .rstrip() + .strip() without reassigning — preserved for parity
+    if s.endswith("mile"):
+        s.rstrip("mile").strip()  # noqa: B005
+    if s.endswith("miles"):
+        s.rstrip("miles").strip()  # noqa: B005
+    if s.endswith("million"):
+        s.rstrip("million").strip()  # noqa: B005
+    s = re.sub(r"\s*\([^)]*\)", "", s).strip()
+    s = re.sub(r"^['\"]|['\"]$", "", s).strip()
+    s = s.strip().lstrip("$").strip().rstrip("%").strip()
+    return s
+
+
+def _is_exact_match(s: str) -> bool:
+    if "https://" in s:
+        return True
+    if s.endswith((".py", "ipynb")):
+        return True
+    if s.startswith("page"):
+        return True
+    if re.fullmatch(r"\b\d+(-\d+|\s\d+)?\b", s):
+        return True
+    if "a.m." in s or "p.m." in s:
+        return True
+    if re.fullmatch(r"\b\d{4}[-\s]\d{2}[-\s]\d{2}\b", s):
+        return True
+    if re.fullmatch(r"\b\d{4}[-\s]\d{2}\b", s):
+        return True
+    if re.fullmatch(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", s):
+        return True
+    return False
+
+
+def _isfloat(num: Any) -> bool:
+    try:
+        float(num)
+        return True
+    except ValueError:
+        return False
+
+
+def eval_score_official(gt: Any, pred: Any, answer_type: str) -> float:
+    """Verbatim MMLongBench-Doc scoring. answer_type ∈ {Int, Float, Str, None, List...}."""
+    if answer_type == "Int":
+        try:
+            return float(int(gt) == int(float(pred)))
+        except Exception:
+            return 0.0
+
+    if answer_type == "Float":
+        try:
+            gt_f = float(_get_clean_string(gt))
+            pred_f = float(_get_clean_string(pred))
+        except Exception:
+            return 0.0
+        return float(_is_float_equal(gt_f, pred_f, include_percentage=True, is_close=True))
+
+    if answer_type in ("Str", "None"):
+        gt_s = _get_clean_string(gt)
+        pred_s = _get_clean_string(pred)
+        return float(gt_s == pred_s) if _is_exact_match(gt_s) else float(_anls_compute(gt_s, pred_s))
+
+    # List branch
+    gt_list = _coerce_list(gt)
+    pred_list = _coerce_list(pred)
+    if len(gt_list) != len(pred_list):
+        return 0.0
+    gt_clean = sorted([_get_clean_string(a) for a in gt_list])
+    pred_clean = sorted([_get_clean_string(a) for a in pred_list])
+    if _isfloat(gt_clean[0]) or _is_exact_match(gt_clean[0]):
+        return float("-".join(gt_clean) == "-".join(pred_clean))
+    return float(min(_anls_compute(gt_v, pred_v) for gt_v, pred_v in zip(gt_clean, pred_clean, strict=True)))
+
+
+def _coerce_list(value: Any) -> list[Any]:
+    if isinstance(value, str) and value.startswith("["):
+        try:
+            return eval(value)  # noqa: S307
+        except Exception:
+            return [value]
+    return list(value) if isinstance(value, list) else [value]
+
+
+class MMLongBenchOfficialScorer:
+    """Leaderboard-comparable accuracy using the benchmark's official scoring protocol."""
+
+    name = "mmlongbench_acc"
+
+    def score(
+        self,
+        *,
+        output: dict[str, Any],
+        expected_output: dict[str, Any],
+        input: dict[str, Any],  # noqa: A002
+        metadata: dict[str, Any],
+    ) -> ScoreResult:
+        answer_format = (metadata or {}).get("answer_format") or (input or {}).get("answer_format") or "Str"
+        got = str((output or {}).get("answer", ""))
+        expected = str((expected_output or {}).get("answer", ""))
+        return ScoreResult(
+            name=self.name,
+            value=eval_score_official(expected, got, answer_format),
+            comment=f"format={answer_format} got={got!r} expected={expected!r}",
+        )

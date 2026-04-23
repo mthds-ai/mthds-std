@@ -1,0 +1,63 @@
+[project]
+name = "mthds-std"
+version = "0.1.0"
+description = "The standard library of MTHDS — generic, reusable primitives for AI methods."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Evotis S.A.S.", email = "evotis@pipelex.com" }]
+maintainers = [{ name = "Pipelex staff", email = "oss@pipelex.com" }]
+requires-python = ">=3.11,<3.15"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Operating System :: OS Independent",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+eval = [
+  "langfuse>=4.5.0",
+  "pandas",
+  "pyarrow",
+  "pipelex==0.24.0",
+  "typer>=0.12",
+]
+dev = [
+  "ruff>=0.6.8",
+  "pyright>=1.1.405",
+  "pipelex-tools>=0.3.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/pipelex/mthds-std"
+Spec = "https://mthds.ai"
+Issues = "https://github.com/pipelex/mthds-std/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eval*"]
+
+[tool.uv]
+required-version = ">=0.7.2"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "TD"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["eval"]
+extraPaths = ["."]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
