@@ -24,6 +24,7 @@ GATE_METRIC ?=
 EXPERIMENT ?=
 RESUME     ?=
 FORCE      ?=
+CONCURRENCY ?= 1
 
 define PRINT_TITLE
     $(eval PROJECT_PART := [$(PROJECT_NAME)])
@@ -292,6 +293,7 @@ run-experiment: env
 		$(if $(strip $(GATE_METRIC)),--gate-metric $(GATE_METRIC),) \
 		$(if $(strip $(RESUME)),--resume,) \
 		$(if $(strip $(FORCE)),--force,) \
+		--concurrency $(CONCURRENCY) \
 		--fail-below $(FAIL_BELOW)
 
 eval: push-dataset run-experiment

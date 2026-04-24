@@ -36,44 +36,67 @@ If the three facts are unclear, ask in ONE message with numbered questions. Do n
 Also ask:
 - **Method name** (snake_case, verb-first where possible: `classify_text`, `summarize`, `extract_entities`)
 - **Desired package version** — usually `0.1.0` for a new primitive
+- **Do you want eval wired in?** Yes/No. Some methods don't need a benchmark-backed scorecard — exploratory primitives, demo methods, or primitives whose inputs/outputs are too open-ended for benchmarks. Default: Yes, especially for anything that'll ship in `mthds-std`.
 
 Record these; they flow into every later phase.
+
+**Phase routing based on the eval answer**:
+
+- **Yes, wire eval** → run all phases 1 → 9 as written
+- **No eval** → skip Phase 1 (benchmark), Phase 5 (eval config), Phase 6 (scorer), Phase 7 (Langfuse judge). Run **only** Phases 2, 3, 4, 8, 9. The method still gets bundled, packaged, and documented — just without a scorecard behind it. Phase 9's handoff drops the `push-dataset` / `run-experiment` commands.
+
+Be explicit with the user which path you're taking. If they change their mind later, adding eval is always possible: just append Phases 1, 5, 6, 7 to an existing method.
 
 ---
 
 ## Phase 1 — Find a benchmark with real ground truth
 
-A new method is not accepted without a benchmark. You must identify one **public, peer-reviewed-or-community-standard dataset** whose ground truth evaluates this method directly.
+A new method is not accepted without a benchmark. You must identify one **public dataset** whose ground truth evaluates this method directly.
 
-Search priorities (in order):
+### Start on Hugging Face — always.
 
-1. **Academic benchmarks** — arXiv + NeurIPS/ICLR/ACL dataset tracks, Hugging Face datasets, Papers-With-Code
-2. **Community benchmarks** — widely-cited OSS datasets (MMLU, HELM suites, task-specific sets)
-3. **Synthesized from a well-known source** — last resort; must be defensible
+[huggingface.co/datasets](https://huggingface.co/datasets) is where essentially every public benchmark is hosted. Filter by task category (question-answering, summarization, text-classification, translation, etc.), sort by downloads, and look at the top 20 results for the primitive's task. That is almost always your candidate list.
 
-For each candidate, verify:
-- **Openly downloadable** (HF parquet, public GitHub, or similar)
-- **Has explicit ground-truth answers** per item
+Why HF first, not arXiv-first:
+- Every seriously-used benchmark publishes there
+- One API surface (`datasets` library), consistent schemas, built-in caching
+- Download counts are a real signal of field adoption
+- The dataset's HF page links back to the paper / GitHub / leaderboard — so you get the academic provenance anyway
+
+Only fall back to arXiv / Papers-With-Code when:
+- The task is too niche for HF's catalog (extremely rare for `mthds-std` primitives)
+- You need a peer-review signal that HF metadata doesn't give you (check the dataset card — most link the paper)
+- The benchmark is new and hasn't been uploaded yet (also rare)
+
+### Per-candidate checklist
+
+For each candidate, verify on the HF dataset card:
+
+- **Openly downloadable** (public, no gated access)
+- **Has explicit ground-truth answers** per item (check the dataset viewer)
 - **Size**: ≥ 100 items for signal, ideally 500–5000
-- **Official scoring methodology** documented (so we can port it as a scorer)
+- **Official scoring methodology** documented (so we can port it as a scorer) — check the linked paper or repo
+- **License** permits redistribution of scoring code if you port it
 
 Present the top 1–3 candidates to the user with a short ranking + reasoning. Let the user pick.
 
-For known classes of primitives, good defaults exist:
+### Known-good defaults by primitive class (all on HF)
 
-| Primitive class | Benchmark candidates |
+| Primitive class | Benchmark candidates (HF paths) |
 |---|---|
-| Document QA | MMLongBench-Doc, FinanceBench, LongBench v2, BRIDGE |
-| Multi-hop QA | MuSiQue, HotpotQA, 2WikiMultihopQA |
-| Classification | AG News, MNLI, SST-5 |
-| Summarization | CNN/DailyMail, XSum |
-| Entity extraction | CoNLL-2003, OntoNotes |
-| Code | HumanEval, MBPP |
-| Translation | FLORES-200, WMT |
+| Document QA | `yubo2333/MMLongBench-Doc`, `PatronusAI/financebench`, `THUDM/LongBench-v2` |
+| Multi-hop QA | `dgslibisey/MuSiQue`, `hotpot_qa`, `dreamerdeo/2wikimultihopqa` |
+| Scientific QA | `allenai/qasper` |
+| Narrative QA | `deepmind/narrativeqa` |
+| Classification | `ag_news`, `nyu-mll/multi_nli`, `SetFit/sst5` |
+| Summarization | `cnn_dailymail`, `EdinburghNLP/xsum` |
+| Entity extraction | `conll2003`, `ontonotes5` |
+| Code | `openai/openai_humaneval`, `google-research-datasets/mbpp` |
+| Translation | `facebook/flores`, `wmt19` |
 
 If none fits, be explicit with the user that we'll need to compose a dataset — flag this as a scope expansion before proceeding.
 
-**Deliverable of this phase**: the user has approved a concrete benchmark with a downloadable URL.
+**Deliverable of this phase**: the user has approved a concrete HF dataset path.
 
 ---
 
@@ -174,7 +197,7 @@ def load_dataset_cases(*, n: int | None = None, all_: bool = False) -> list[dict
 ```
 
 Implementation rules:
-- **Fetch datasets over HTTP with caching** at `~/.cache/mthds-std-eval/<benchmark>.<ext>` to avoid re-downloading
+- **Load datasets via the `datasets` library** — `from datasets import load_dataset; ds = load_dataset("<hf_path>", split="train")`. Handles caching, schema, streaming, auth. Do NOT roll your own `urlretrieve` + pandas loader.
 - **Every case dict must have** `input` (pipe-inputs payload), `expected_output` (dict with the benchmark's reference answer), `metadata` (dict). `metadata.doc_id` (or any stable item id) is used for idempotency in the seeder.
 - **`input` is the pipe inputs directly** — keys match the bundle's declared inputs exactly, values are `{"concept": "...", "content": {...}}` stuffs. At run time, the framework passes `item.input` straight to `execute_pipeline(inputs=item.input)` with **zero transformation**.
 - **`load_dataset_cases`** must respect both `n=<int>` and `all_=True`; if the user asks for both, `all_` wins
@@ -201,17 +224,15 @@ For **standard metrics** (accuracy, F1, BLEU, ROUGE, exact match), prefer reusin
 
 ---
 
-## Phase 7 — Configure the Langfuse LLM-as-judge (instructions, not actions)
+## Phase 7 — Extend the existing Langfuse judge filter (one-line UI step)
 
-You cannot configure the Langfuse UI yourself. Produce **step-by-step UI instructions** the user can follow in ~5 minutes:
+The Langfuse LLM-as-judge (`Answer Correctness` or equivalent) is **already configured project-wide**. You don't create it.
 
-- Evaluator type: **LLM-as-judge** (Simple Criteria preferred for short-answer methods; Ragas Answer Correctness for longer analytical methods)
-- Judge model: Claude reasoning-class or GPT reasoning-class
-- Prompt template that references the variables the framework provides (`{{input.*}}`, `{{output.answer}}`, `{{expected_output.answer}}`)
-- **Scope**: Experiments (not Production)
-- **Filter**: dataset = `<DATASET_NAME>`
+What you DO need: add the new dataset name to its **filter list** so the judge runs on experiments against your dataset. In the Langfuse UI:
 
-Save these as a block in the method's `GROUND_TRUTH.md` so the setup is documented alongside the data.
+- **Evaluators** → open the existing judge config → **Filter**: add `<DATASET_NAME>` to the "dataset is one of" list → Save
+
+That's it. One dropdown edit. Then judge scores will populate for this method's runs the same way they do for existing methods.
 
 ---
 
@@ -234,35 +255,47 @@ Never silence errors with broad `# type: ignore` unless the underlying issue is 
 
 ---
 
-## Phase 9 — Stop. Do not run the eval.
+## Phase 9 — Smoke-test on 5 items, then hand off the full run
 
-**Do NOT execute**:
-- `make push-dataset ...`
-- `make run-experiment ...`
-- `python eval/push_dataset.py ...`
-- `python eval/run_experiment.py ...`
+Run a **5-item smoke test** yourself. This is cheap (~30s of LLM time per item) and proves the full pipeline works before the user commits budget to a full benchmark run.
 
-These hit real LLM APIs and Langfuse — the user decides when to spend that budget.
+```bash
+# 1. Seed a 5-item sample dataset
+make push-dataset METHOD=<name> N=5
 
-Instead, produce a **final handoff message** summarising:
+# 2. (User: one-time UI step — extend the judge filter to include this dataset)
 
-1. What was created: list the new files under `methods/<name>/` and any new scorer under `eval/scorers/`
-2. The benchmark chosen + source URL
-3. `DATASET_NAME` and expected item count (a few sentences)
-4. The Langfuse UI setup instructions from Phase 7 (copy-paste friendly)
-5. The three commands the user runs next, in order:
+# 3. Run the experiment on the 5-item sample
+make run-experiment METHOD=<name> FAIL_BELOW=0.0
+```
+
+What you're proving with the smoke test:
+- Pipelex executes the bundle end-to-end on real LLM calls
+- The method's `eval/configs/<name>.py::load_dataset_cases` produces correctly-shaped cases
+- The bundle inputs align with what `build_bundle_inputs` produces
+- Langfuse dataset + experiment + trace linkage works
+- Deterministic scorers (exact_match + any benchmark scorer) produce sensible numbers
+- The gate mechanism fires
+
+If the smoke test passes, the full-dataset run will work the same way. If it fails, fix before handing over.
+
+Then produce a **final handoff message** to the user summarising:
+
+1. What was created: new files under `methods/<name>/` and `eval/configs/<name>.py` (+ any new scorer)
+2. The benchmark chosen + HF path
+3. `DATASET_NAME` and expected full item count
+4. **Smoke test results**: `<exact_match>`, `<benchmark scorer>`, judge availability, Langfuse experiment URL
+5. The command for the full-benchmark run when they're ready:
 
    ```bash
-   # 1. seed the dataset (one-time per benchmark)
-   make push-dataset METHOD=<name>          # or: make push-dataset-all METHOD=<name>
+   # Seed the full dataset (one-time)
+   make push-dataset-all METHOD=<name>
 
-   # 2. (UI step — see above)
-
-   # 3. run the experiment.
-   #    Experiment name is auto-derived from methods/<name>/METHODS.toml:
-   #    '<package_name>@<package_version>'. The runner REJECTS re-runs at the
-   #    same version — bump the version in METHODS.toml first.
-   make run-experiment METHOD=<name>
+   # Run the full benchmark. Experiment name auto-derives from
+   # methods/<name>/METHODS.toml as '<package_name>@<package_version>'.
+   # The runner REJECTS re-runs at the same version —
+   # bump [package].version in METHODS.toml to re-run.
+   make run-experiment METHOD=<name> FAIL_BELOW=<threshold>
    ```
 
 6. What score to expect if there's a public leaderboard for the benchmark

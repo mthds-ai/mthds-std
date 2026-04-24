@@ -179,7 +179,7 @@ Absolute rules:
 prompt = """
 @context
 
-Question: @question
+@question
 
 Question analysis:
 @analysis
