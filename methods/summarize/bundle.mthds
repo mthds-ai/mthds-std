@@ -102,7 +102,7 @@ status = { type = "text", description = "Outcome of the summarization attempt.",
   "partial",
   "unsafe_to_summarize",
 ] }
-summary = { type = "text", description = "The summary text itself, in the requested format. Never empty for status='summarized' or 'partial'.", required = true }
+answer = { type = "text", description = "The summary text itself, in the requested format. Never empty for status='summarized' or 'partial'. Field named 'answer' for consistency with other mthds-std methods and Langfuse judge configurations.", required = true }
 key_points = { type = "list", description = "3–7 distilled takeaways. Always populated, regardless of the chosen format.", required = true }
 preserved_entities = { type = "list", description = "Entities from the source that appear in the summary, with their types. The cheap faithfulness anchor callers can audit." }
 uncovered_aspects = { type = "list", description = "Parts of the source NOT covered by this summary. Explicit honesty about omission — do not leave empty if coverage is partial." }
@@ -221,7 +221,7 @@ Rules:
 
 Fields:
 - status: 'summarized' for a successful summary; 'partial' if the source is too thin or contradictory to fully summarize.
-- summary: the actual summary in the requested format.
+- answer: the actual summary text in the requested format.
 - key_points: 3–7 distilled takeaways, always populated.
 - preserved_entities: entities from the source that appear in your summary, with their type.
 - uncovered_aspects: anything important in the source you chose not to include. Be honest — do not leave this empty if the source has significant material you're omitting.
@@ -501,7 +501,7 @@ You are producing the final Summary by applying a faithfulness report to a draft
 
 Approach:
 1. Start from the draft.
-2. Remove every claim listed in unsupported_claims from the draft's summary field.
+2. Remove every claim listed in unsupported_claims from the draft's answer field.
 3. Apply the status_adjustment from the report:
    - 'keep' → keep draft's status
    - 'downgrade_to_partial' → status = 'partial'

@@ -164,6 +164,32 @@ def scorer_to_evaluator(scorer: Scorer) -> EvaluatorFunction:
 # ---------------------------------------------------------------------------
 
 
+def _find_existing_runs(*, langfuse: Langfuse, run_name: str) -> list[tuple[str, int]]:
+    """Return a list of (dataset_name, item_count) for every dataset in the project
+    that already has a dataset_run with the given name.
+
+    Project-wide uniqueness check — a method version is identified by its run_name,
+    so the same name appearing on any dataset means the method was already evaluated.
+    """
+    matches: list[tuple[str, int]] = []
+    try:
+        resp = langfuse.api.datasets.list()
+    except Exception:
+        return matches
+    for ds in getattr(resp, "data", []) or []:
+        ds_name = getattr(ds, "name", None)
+        if not ds_name:
+            continue
+        try:
+            existing = langfuse.get_dataset_run(dataset_name=ds_name, run_name=run_name)
+        except Exception:
+            continue
+        items = getattr(existing, "dataset_run_items", None) or []
+        if items:
+            matches.append((ds_name, len(items)))
+    return matches
+
+
 def wait_for_judge_scores(
     *,
     langfuse: Langfuse,
@@ -295,16 +321,27 @@ def run_experiment(
     langfuse, base_url = build_langfuse_client()
     ds = langfuse.get_dataset(dataset_name)
 
-    # Version-uniqueness gate
+    # Version-uniqueness gate — project-wide, not just this dataset.
+    # A method version identifies a specific state of the code; the same version must
+    # not run twice anywhere in the project (on any dataset). Force a version bump for
+    # any re-run, even across datasets.
     if not resume and not force:
-        try:
-            existing = langfuse.get_dataset_run(dataset_name=dataset_name, run_name=exp_name)
-        except Exception:
-            existing = None
-        if existing is not None and getattr(existing, "dataset_run_items", None):
+        prior_datasets = _find_existing_runs(langfuse=langfuse, run_name=exp_name)
+        # If the only prior run is on THIS dataset, that's the normal "already ran here" case.
+        # If there's also a run on any OTHER dataset at this version, that's the cross-dataset case.
+        if prior_datasets:
+            other_datasets = [name for name, _ in prior_datasets if name != dataset_name]
+            same_dataset = next(((n, c) for n, c in prior_datasets if n == dataset_name), None)
+            parts: list[str] = []
+            if same_dataset is not None:
+                parts.append(f"already ran on '{same_dataset[0]}' ({same_dataset[1]} items)")
+            if other_datasets:
+                parts.append(f"already ran on: {', '.join(other_datasets)}")
             raise ExperimentAlreadyExists(
-                f"{exp_name} already ran ({len(existing.dataset_run_items)} items on '{dataset_name}'). "
-                f"Bump [package].version in methods/{method}/METHODS.toml, or pass --resume / --force."
+                f"{exp_name} " + "; ".join(parts) + ". "
+                f"Any change that would produce a different score requires a version bump — "
+                f"edit [package].version in methods/{method}/METHODS.toml. "
+                f"Pass --resume to append items to the existing run, or --force to overwrite."
             )
 
     evaluators: list[EvaluatorFunction] = [scorer_to_evaluator(s) for s in scorers]

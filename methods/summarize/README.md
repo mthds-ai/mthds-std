@@ -90,7 +90,7 @@ Internally, a four-step pipeline:
 A `Summary` with:
 
 - `status` — one of the three values above
-- `summary` — the summary text itself, in the requested format
+- `answer` — the summary text itself, in the requested format. Named `answer` for consistency with other `mthds-std` methods and with the shared Langfuse LLM-judge configuration.
 - `key_points` — 3 to 7 distilled takeaways, always populated regardless of format
 - `preserved_entities` — entities from the source that appear in the summary, each with a type category (person, organization, location, date, number, other). The cheap faithfulness anchor callers can audit without running a judge.
 - `uncovered_aspects` — parts of the source NOT covered by this summary. Explicit honesty about omission; this field is populated when the summary trades coverage for length.

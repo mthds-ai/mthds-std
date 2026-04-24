@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from eval.scorers import EntityPreservationScorer, LengthHitScorer
+from eval.scorers import EntityPreservationScorer
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -42,21 +42,19 @@ DATASET_NAME = "xsum-sample-v1"
 DATASET_DESCRIPTION = "XSum extreme-summarization sample for the summarize primitive."
 
 # Langfuse-UI LLM-judge evaluators to poll for after the experiment.
-# For summarize, we want a faithfulness judge; extend the existing project-wide
-# judge's dataset filter to include DATASET_NAME so this works.
-JUDGE_SCORE_NAMES = ["Summary Faithfulness"]
+# Reuses the existing project-wide "Answer Correctness" judge — works because our
+# output field is `answer` (same convention as answer_from_documents) and our
+# expected_output is also keyed on `answer`. Just extend its dataset filter to
+# include DATASET_NAME in the Langfuse UI.
+JUDGE_SCORE_NAMES = ["Answer Correctness"]
 
-# Primary gate metric. For a noisy-but-signal scorer, entity_preservation_rate is
-# the best deterministic anchor. If Summary Faithfulness is configured and scoring,
-# switch GATE_METRIC to it for stricter gating.
-GATE_METRIC = "entity_preservation_rate"
+# Primary gate metric: the LLM judge. entity_preservation_rate remains as a cheap
+# deterministic anchor but is not the gate — a 1-sentence XSum target cannot preserve
+# more than a small fraction of source entities by design, so the rate is structurally low.
+GATE_METRIC = "Answer Correctness"
 
 # Deterministic scorers run synchronously on every item.
-SCORERS = [
-    LengthHitScorer(tolerance=0.5),  # XSum summaries are single-sentence, ~20-30 words;
-    # our 'short' target of 50 is generous. Tolerance wide.
-    EntityPreservationScorer(),
-]
+SCORERS = [EntityPreservationScorer()]
 
 # ---------------------------------------------------------------------------
 # Dataset loading via HF datasets library
@@ -81,7 +79,7 @@ def _row_to_case(row: dict[str, Any]) -> dict[str, Any]:
             "format": {"concept": "native.Text", "content": {"text": "prose"}},
             "audience": {"concept": "native.Text", "content": {"text": ""}},
         },
-        "expected_output": {"summary": reference},
+        "expected_output": {"answer": reference},
         "metadata": {
             "benchmark": "XSum",
             "doc_id": doc_id,

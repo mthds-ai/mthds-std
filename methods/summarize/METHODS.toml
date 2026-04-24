@@ -2,7 +2,7 @@
 name = "summarize"
 address = "github.com/pipelex/mthds-std"
 display_name = "Summarize"
-version = "0.1.0"
+version = "0.1.1"
 description = "# summarize\n\nFaithful, length-controlled summarization of a single text. Profiles the input, routes to a strategy that fits its kind (short text, research paper with an existing abstract, general mid-length prose, or long document needing chunked synthesis), drafts the summary, and verifies every claim against the source before returning.\n\n## Design\n\nFour internal strategies, picked by the profiler:\n\n- **single_shot** — short text, one LLM call\n- **promote_preexisting** — research papers / whitepapers / reports with abstracts; uses the existing summary as a spine and enriches\n- **extract_then_write** — general medium text; extracts key facts first, drafts grounded in those facts\n- **chunk_map_reduce** — long documents; chunk, parallel-summarize, merge with source-grounding\n\nAll strategies converge into a shared verify_faithfulness → finalize_summary path. Every claim in the final summary is traced back to the source.\n\n## Output\n\nA Summary with status, summary text, key_points, preserved_entities, uncovered_aspects (explicit omissions), length_words, confidence, and strategy_used for traceability.\n\n## Known limits in v0.1.0\n\n- Single-text input only. For multi-document, compose with answer_from_documents or wait for summarize_corpus.\n- No conversation / meeting / chat specialization. Those belong in a sibling primitive.\n- Chunking uses an LLM pass (not deterministic); slow on very_long inputs.\n- Faithfulness judge is zero-shot by default; accuracy improves substantially with few-shot examples."
 authors = ["Evotis S.A.S"]
 license = "MIT"

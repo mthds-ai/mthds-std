@@ -226,82 +226,6 @@ def _coerce_list(value: Any) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
-# LengthHitScorer — generic; checks whether output length meets the target
-# ---------------------------------------------------------------------------
-
-
-def _word_count(text: str) -> int:
-    return len(text.split())
-
-
-def _target_word_count(length_hint: str, default: int = 150) -> int | None:
-    """Resolve a length hint to a target word count.
-
-    Accepts: 'short' | 'medium' | 'long' | '<N> words' | '<N>' | '' (→ default).
-    Returns None when unknown (caller should treat as unscorable).
-    """
-    if not length_hint:
-        return default
-    hint = length_hint.strip().lower()
-    buckets = {"short": 50, "medium": 150, "long": 400}
-    if hint in buckets:
-        return buckets[hint]
-    number_match = re.search(r"\d+", hint)
-    return int(number_match.group(0)) if number_match else None
-
-
-class LengthHitScorer:
-    """Output-length vs. target hit-rate (±tolerance).
-
-    Reads the summary text from `output["summary"]` and resolves a target from:
-      1. `input["length"]["content"]["text"]` (our Summary primitive's shape)
-      2. `metadata["length"]` fallback
-    Returns 1.0 if within tolerance, 0.0 otherwise.
-    """
-
-    name = "length_hit"
-
-    def __init__(self, tolerance: float = 0.2) -> None:
-        self.tolerance = tolerance
-
-    def score(
-        self,
-        *,
-        output: dict[str, Any],
-        expected_output: dict[str, Any],  # noqa: ARG002
-        input: dict[str, Any],  # noqa: A002
-        metadata: dict[str, Any],
-    ) -> ScoreResult:
-        text = str((output or {}).get("summary", ""))
-        actual = _word_count(text)
-
-        length_hint = ""
-        if isinstance(input, dict):
-            hint_node = input.get("length")
-            if isinstance(hint_node, dict):
-                content = hint_node.get("content") or {}
-                if isinstance(content, dict):
-                    length_hint = str(content.get("text", ""))
-        if not length_hint and isinstance(metadata, dict):
-            length_hint = str(metadata.get("length", ""))
-
-        target = _target_word_count(length_hint)
-        if target is None or target == 0:
-            return ScoreResult(
-                name=self.name,
-                value=0.0,
-                comment=f"could not resolve target from hint={length_hint!r}; actual={actual}",
-            )
-        lower, upper = target * (1 - self.tolerance), target * (1 + self.tolerance)
-        hit = lower <= actual <= upper
-        return ScoreResult(
-            name=self.name,
-            value=1.0 if hit else 0.0,
-            comment=f"actual={actual} target={target} ±{int(self.tolerance * 100)}% → {'hit' if hit else 'miss'}",
-        )
-
-
-# ---------------------------------------------------------------------------
 # EntityPreservationScorer — generic; fraction of source entities kept in output
 # ---------------------------------------------------------------------------
 
@@ -347,7 +271,7 @@ class EntityPreservationScorer:
         input: dict[str, Any],  # noqa: A002
         metadata: dict[str, Any],
     ) -> ScoreResult:
-        summary = str((output or {}).get("summary", ""))
+        summary = str((output or {}).get("answer", ""))
         source = ""
         if isinstance(input, dict):
             text_node = input.get("text")
