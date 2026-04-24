@@ -19,8 +19,8 @@ from langfuse import Langfuse
 from langfuse.experiment import Evaluation, EvaluatorFunction
 from langfuse.types import ExperimentScoreType
 from mthds.package.manifest.parser import parse_methods_toml
-from pipelex.pipeline.runner import PipelexRunner
 from pipelex.pipelex import Pipelex
+from pipelex.pipeline.runner import PipelexRunner
 
 from eval.scorers import Scorer, ScoreResult
 
@@ -127,9 +127,7 @@ def make_task(main_pipe: str, bundle_text: str):
     runner = PipelexRunner()
 
     async def task(*, item: Any, **_kwargs: Any) -> dict[str, Any]:
-        response = await runner.execute_pipeline(
-            pipe_code=main_pipe, mthds_contents=[bundle_text], inputs=item.input
-        )
+        response = await runner.execute_pipeline(pipe_code=main_pipe, mthds_contents=[bundle_text], inputs=item.input)
         content = response.pipe_output.main_stuff.content
         if hasattr(content, "model_dump"):
             return cast(dict[str, Any], content.model_dump())

@@ -1,0 +1,20 @@
+{
+  "text": {
+    "concept": "native.Text",
+    "content": {
+      "text": "The Commonwealth's recent whitepaper on maritime trade routes outlines a five-year strategy to reduce reliance on the Suez Canal by investing in the Arctic Northern Sea Route. The report, published in March 2024 by the Department of Trade, projects a 14% reduction in average transit times between Rotterdam and Shanghai if the new route reaches 40% utilization by 2029. Critics note that the analysis omits ice-class vessel costs, which industry estimates place at 2.3x the price of conventional container ships. The whitepaper also proposes a joint venture with Norway's Storebrand and Russia's Sovcomflot, a partnership that has drawn regulatory concern under EU sanctions. Ultimately, the success of the plan depends on climate trajectories that the authors themselves describe as 'subject to significant variance'."
+    }
+  },
+  "length": {
+    "concept": "native.Text",
+    "content": {"text": "short"}
+  },
+  "format": {
+    "concept": "native.Text",
+    "content": {"text": "prose"}
+  },
+  "audience": {
+    "concept": "native.Text",
+    "content": {"text": ""}
+  }
+}

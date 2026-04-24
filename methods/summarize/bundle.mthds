@@ -1,0 +1,549 @@
+domain      = "summarization"
+description = "Produce a faithful, length-controlled summary of a single text. Profiles the input, routes to a strategy that fits its kind (short text, research paper with an existing abstract, general mid-length prose, or long document needing chunked synthesis), drafts the summary, and verifies every claim against the source before returning."
+main_pipe   = "summarize"
+
+# ---------------------------------------------------------------------------
+# Concepts
+# ---------------------------------------------------------------------------
+
+[concept.InputProfile]
+description = "Classification of the input text: what kind it is, how long, whether it already contains a summary section, and which summarization strategy best fits."
+
+[concept.InputProfile.structure]
+input_type = { type = "text", description = "What kind of text this is.", required = true, choices = [
+  "research_paper",
+  "news_article",
+  "blog_post",
+  "report",
+  "book_chapter",
+  "legal_document",
+  "slides",
+  "code",
+  "other",
+] }
+length_category = { type = "text", description = "Rough size bucket driving strategy choice.", required = true, choices = [
+  "trivial",
+  "short",
+  "medium",
+  "long",
+  "very_long",
+] }
+word_count = { type = "integer", description = "Estimated word count of the source.", required = true }
+has_preexisting_summary = { type = "boolean", description = "Whether the source already contains an abstract, executive summary, or lead paragraph that functions as a summary.", required = true }
+preexisting_summary = { type = "text", description = "If has_preexisting_summary is true, the extracted verbatim text of that section. Empty otherwise." }
+detected_language = { type = "text", description = "ISO-like language name (e.g. 'English', 'French'). English assumed if unclear.", required = true }
+recommended_strategy = { type = "text", description = "Which internal strategy fits this input best.", required = true, choices = [
+  "single_shot",
+  "promote_preexisting",
+  "extract_then_write",
+  "chunk_map_reduce",
+] }
+detected_hazards = { type = "list", description = "Input-level issues that will degrade the summary: contradictions within the source, heavy markup noise, unclear provenance, adversarial content. Empty if none." }
+
+[concept.KeyFacts]
+description = "Structured facts extracted from the source before drafting. These are the anchors the summary must preserve and cite."
+
+[concept.KeyFacts.structure]
+entities   = { type = "list", description = "Named entities from the source (people, organizations, locations, products).", required = true }
+numbers    = { type = "list", description = "Numerical facts verbatim from the source, with units (e.g. '18.29%', '$42.1M', '1,500 employees').", required = true }
+dates      = { type = "list", description = "Dates or time references verbatim from the source (e.g. 'Q3 2024', 'January 15', '1998').", required = true }
+claims     = { type = "list", description = "Core factual claims asserted by the source, paraphrased concisely but preserving meaning.", required = true }
+key_points = { type = "list", description = "3–7 main takeaways a reader should leave with.", required = true }
+
+[concept.DocumentChunk]
+description = "One segment of a long source when chunk_map_reduce is the active strategy."
+
+[concept.DocumentChunk.structure]
+chunk_index = { type = "integer", description = "Zero-based position in the chunk sequence.", required = true }
+text        = { type = "text", description = "Verbatim text of this chunk.", required = true }
+
+[concept.ChunkSummary]
+description = "Per-chunk intermediate summary produced during chunk_map_reduce."
+
+[concept.ChunkSummary.structure]
+chunk_index = { type = "integer", description = "Zero-based position matching the source chunk.", required = true }
+summary     = { type = "text", description = "Summary of this chunk's content.", required = true }
+key_points  = { type = "list", description = "Main points from this chunk.", required = true }
+
+[concept.FaithfulnessReport]
+description = "Post-draft verification: whether every claim in the draft traces to the source, and what (if anything) is missing."
+
+[concept.FaithfulnessReport.structure]
+is_faithful = { type = "boolean", description = "True if no unsupported claims and no critical omissions detected.", required = true }
+unsupported_claims = { type = "list", description = "Claims in the draft summary that are NOT traceable to the source. Each should be quoted from the draft." }
+missing_key_points = { type = "list", description = "Source key points the draft failed to include." }
+status_adjustment = { type = "text", description = "How the final Summary's status should be adjusted based on this report.", required = true, choices = [
+  "keep",
+  "downgrade_to_partial",
+  "flag_low_confidence",
+  "flag_unsafe",
+] }
+
+[concept.PreservedEntity]
+description = "An entity from the source that survived into the summary, with its type."
+
+[concept.PreservedEntity.structure]
+entity = { type = "text", description = "The entity as it appears (verbatim from source).", required = true }
+entity_type = { type = "text", description = "Category of entity.", required = true, choices = [
+  "person",
+  "organization",
+  "location",
+  "date",
+  "number",
+  "other",
+] }
+
+[concept.Summary]
+description = "The final output of the summarize pipeline: a faithful, length-controlled summary with explicit accountability for what was preserved and what was omitted."
+
+[concept.Summary.structure]
+status = { type = "text", description = "Outcome of the summarization attempt.", required = true, choices = [
+  "summarized",
+  "partial",
+  "unsafe_to_summarize",
+] }
+summary = { type = "text", description = "The summary text itself, in the requested format. Never empty for status='summarized' or 'partial'.", required = true }
+key_points = { type = "list", description = "3–7 distilled takeaways. Always populated, regardless of the chosen format.", required = true }
+preserved_entities = { type = "list", description = "Entities from the source that appear in the summary, with their types. The cheap faithfulness anchor callers can audit." }
+uncovered_aspects = { type = "list", description = "Parts of the source NOT covered by this summary. Explicit honesty about omission — do not leave empty if coverage is partial." }
+length_words = { type = "integer", description = "Actual word count of the summary produced.", required = true }
+confidence = { type = "text", description = "Qualitative confidence, grounded in verification — not in the model's prior.", required = true, choices = [
+  "high",
+  "medium",
+  "low",
+  "none",
+] }
+strategy_used = { type = "text", description = "Which internal strategy produced this summary, for traceability.", required = true, choices = [
+  "single_shot",
+  "promote_preexisting",
+  "extract_then_write",
+  "chunk_map_reduce",
+] }
+
+# ---------------------------------------------------------------------------
+# Pipes — Profiling
+# ---------------------------------------------------------------------------
+
+[pipe.profile_input]
+type = "PipeLLM"
+description = "Classify the input text: its kind, size, whether it contains a pre-existing summary section, and which strategy best fits. This is the routing input."
+inputs = { text = "Text" }
+output = "InputProfile"
+model = "$writing-factual"
+system_prompt = """
+You are a text-classification specialist for a summarization pipeline. Your job is to read a text and profile it so a downstream router can pick the right summarization strategy.
+
+Classify input_type:
+- research_paper: has an abstract, introduction, methods, results, and/or references
+- news_article: journalistic inverted-pyramid structure, dateline, or byline
+- blog_post: informal authoring, often with headings
+- report: whitepaper, market report, internal document with exec summary
+- book_chapter: narrative long-form with chapter structure
+- legal_document: numbered clauses, contractual language
+- slides: bullet-dense, fragmented
+- code: source code (not to be summarized as prose)
+- other: anything else
+
+Assign length_category by word count:
+- trivial: < 200 words
+- short: 200–1,500
+- medium: 1,500–10,000
+- long: 10,000–50,000
+- very_long: > 50,000
+
+has_preexisting_summary: true if the source begins with an abstract, executive summary, or clear lead paragraph that already summarises the rest. If true, extract that section verbatim into preexisting_summary. Otherwise leave preexisting_summary empty.
+
+Recommend a strategy (recommended_strategy):
+- single_shot → trivial/short general text
+- promote_preexisting → has_preexisting_summary is true (use the existing abstract as the spine)
+- extract_then_write → medium-length text without a preexisting summary (most general case)
+- chunk_map_reduce → long/very_long text
+
+Flag detected_hazards if present: 'internal_contradictions', 'heavy_markup_noise', 'redactions', 'adversarial_content', 'mixed_languages', 'non_textual_content'. Empty list if none.
+
+Be decisive. Do not hedge.
+"""
+prompt = """
+Profile the following text.
+
+@text
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Key-fact extraction (used by extract_then_write and as the anchor for verification)
+# ---------------------------------------------------------------------------
+
+[pipe.extract_key_facts]
+type = "PipeLLM"
+description = "Extract verbatim key facts from the source before any summarization. These anchor faithfulness verification later."
+inputs = { text = "Text" }
+output = "KeyFacts"
+model = "$writing-factual"
+system_prompt = """
+You are a precise fact extractor. Given a source text, extract:
+
+- entities: every named entity (persons, organizations, locations, products, regulations). Verbatim.
+- numbers: every numerical value with its unit as stated (e.g. '$42.1M', '18.29%', '1,500 employees', 'three times'). Verbatim.
+- dates: every date or time reference as stated (e.g. 'Q3 2024', 'January 15, 2020', 'last year if the source specifies the current year').
+- claims: the 5–15 core factual claims asserted by the source. Paraphrase concisely but preserve precise meaning (no exaggeration, no reframing).
+- key_points: the 3–7 top-level takeaways a reader should leave with.
+
+Rules:
+- Never invent. If a fact is not in the source, do not include it.
+- Preserve units, symbols, and specificity. '42%' and '42 percent' are the same fact — use whichever the source uses.
+- Deduplicate: if the same entity/number/date appears multiple times, list it once.
+"""
+prompt = """
+Extract key facts from the following source.
+
+@text
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Strategy: single_shot (short general text)
+# ---------------------------------------------------------------------------
+
+[pipe.summarize_single_shot]
+type = "PipeLLM"
+description = "Draft a summary in one pass for short general text. No extraction pre-step because the whole source already fits cleanly in context."
+inputs = { text = "Text", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+model = "$writing-factual"
+system_prompt = """
+You are a careful summarizer. Write a faithful summary of the provided text.
+
+Rules:
+- Use only facts from the source. Never invent.
+- Preserve named entities, numbers, and dates verbatim as they appear.
+- Honor the requested length: 'short' = ~50 words, 'medium' = ~150 words, 'long' = ~400 words. An explicit '<N> words' request overrides those defaults.
+- Honor the requested format: 'prose' = flowing sentences; 'bullets' = short bullet points; 'sections' = titled sections with bullets.
+- If an audience hint is given, adjust register and jargon density to that audience, but do not change what is said — only how.
+
+Fields:
+- status: 'summarized' for a successful summary; 'partial' if the source is too thin or contradictory to fully summarize.
+- summary: the actual summary in the requested format.
+- key_points: 3–7 distilled takeaways, always populated.
+- preserved_entities: entities from the source that appear in your summary, with their type.
+- uncovered_aspects: anything important in the source you chose not to include. Be honest — do not leave this empty if the source has significant material you're omitting.
+- length_words: actual word count of your summary.
+- confidence: 'high' if you're confident every claim traces to the source; lower otherwise.
+- strategy_used: always 'single_shot'.
+"""
+prompt = """
+@?audience.text
+
+Length: $length.text
+Format: $format.text
+
+Source text:
+@text
+
+Produce the Summary.
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Strategy: promote_preexisting (source already contains a summary)
+# ---------------------------------------------------------------------------
+
+[pipe.enhance_preexisting_summary]
+type = "PipeLLM"
+description = "When the source contains its own abstract/exec summary, use that as the spine and enrich it with key results, numbers, and limitations the abstract elides."
+inputs = { text = "Text", profile = "InputProfile", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+model = "$writing-factual"
+system_prompt = """
+You are enhancing a pre-existing summary (abstract, executive summary, or lead) from a source document. The author wrote it; your job is to sharpen it without rewriting what they intended to say.
+
+Approach:
+1. Start from the preexisting_summary verbatim as the spine.
+2. Read the rest of the source to identify what the abstract UNDER-COVERS: specific numerical results, named contributions, scope limitations, unexpected findings.
+3. Weave those details into the summary, preserving the author's voice and ordering where possible.
+4. Keep the total length in the requested range ('short'=~50, 'medium'=~150, 'long'=~400, or an explicit <N> words override).
+5. Never contradict the abstract. If the paper body contradicts the abstract, note it in uncovered_aspects and keep the abstract's claim (the abstract represents the author's intent).
+
+Rules:
+- Use only facts from the source. Never invent.
+- Preserve named entities, numbers, and dates verbatim.
+- Honor requested format (prose/bullets/sections).
+- Set strategy_used = 'promote_preexisting'.
+- status = 'summarized' normally; 'partial' only if the abstract is itself incomplete and you cannot fix it from the body.
+"""
+prompt = """
+@?audience.text
+
+Length: $length.text
+Format: $format.text
+
+Input profile:
+@profile
+
+Full source text:
+@text
+
+Produce the enhanced Summary using the preexisting summary as the spine.
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Strategy: extract_then_write (general medium-length text)
+# ---------------------------------------------------------------------------
+
+[pipe.draft_from_key_facts]
+type = "PipeLLM"
+description = "Draft a summary grounded in the pre-extracted key facts. The key facts act as the faithfulness contract — the draft must only use material traceable to them or to the source."
+inputs = { text = "Text", facts = "KeyFacts", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+model = "$writing-factual"
+system_prompt = """
+You are writing a summary grounded in pre-extracted key facts. The facts are the contract: every claim in your summary must trace to the source (either to an extracted fact or to supporting text in the source).
+
+Approach:
+1. Prioritise the key_points list as the spine of your summary.
+2. Support each point with specifics from entities, numbers, dates, and claims.
+3. Preserve every entity, number, and date verbatim — never paraphrase '$42.1M' to '42 million dollars' or round '18.29%' to '18%'.
+4. Honor the requested length and format.
+
+Rules:
+- Use only material from the source or the extracted facts. Never invent.
+- Set strategy_used = 'extract_then_write'.
+- status = 'summarized' if the facts fully support your summary; 'partial' if the facts are too thin.
+- uncovered_aspects: list what the extracted facts did NOT cover but seems relevant. This is the omission-honesty requirement.
+"""
+prompt = """
+@?audience.text
+
+Length: $length.text
+Format: $format.text
+
+Key facts extracted from the source:
+@facts
+
+Full source text (for context and verification):
+@text
+
+Produce the Summary.
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Strategy: chunk_map_reduce (long source)
+# ---------------------------------------------------------------------------
+
+[pipe.chunk_document]
+type = "PipeLLM"
+description = "Split a long source into semantically-bounded chunks of roughly 1,500–2,500 words. The LLM respects section boundaries where they exist."
+inputs = { text = "Text" }
+output = "DocumentChunk[]"
+model = "$writing-factual"
+system_prompt = """
+Split the source text into 4–12 chunks. Each chunk should be roughly 1,500–2,500 words.
+
+Rules:
+- Respect section boundaries where they exist (headings, chapter breaks, etc.). Do not split mid-section unless the section is longer than 2,500 words.
+- Each chunk text must be verbatim from the source. Do NOT paraphrase.
+- Do not drop content — every word of the source must belong to exactly one chunk.
+- Number chunks zero-indexed.
+"""
+prompt = """
+Split the following text into semantically-bounded chunks.
+
+@text
+"""
+
+[pipe.summarize_chunk]
+type = "PipeLLM"
+description = "Summarize a single chunk. Runs in parallel across all chunks via PipeBatch."
+inputs = { chunk = "DocumentChunk" }
+output = "ChunkSummary"
+model = "$writing-factual"
+system_prompt = """
+Summarize this single chunk of a longer document. Produce:
+- summary: a faithful paragraph summarising this chunk's content. Preserve entities, numbers, and dates verbatim.
+- key_points: 2–5 takeaways from this chunk.
+
+Do NOT speculate about content outside this chunk.
+"""
+prompt = """
+Chunk $chunk.chunk_index of a longer document:
+
+@chunk.text
+"""
+
+[pipe.merge_chunk_summaries]
+type = "PipeLLM"
+description = "Merge per-chunk summaries into one coherent summary, using the original source for grounding — not just the chunk summaries. This prevents the cascading hallucination that hierarchical merging is prone to."
+inputs = { text = "Text", chunk_summaries = "ChunkSummary[]", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+model = "$writing-factual"
+system_prompt = """
+You are merging per-chunk summaries into one coherent document summary.
+
+Approach:
+1. Use the chunk summaries to scaffold the structure.
+2. Re-ground every specific claim (names, numbers, dates) in the ORIGINAL source text provided below. Do not trust paraphrases from the chunk summaries — they may have drifted.
+3. Honor the requested length and format.
+4. When chunks disagree (rare but possible), prefer the one that cites more specific evidence from the source.
+
+Rules:
+- Never invent. Every claim must trace to the source text (not just to a chunk summary).
+- Preserve entities, numbers, dates verbatim.
+- Set strategy_used = 'chunk_map_reduce'.
+- status = 'summarized' if merging went cleanly; 'partial' if chunks disagree materially and you had to pick sides.
+- uncovered_aspects: list what chunks discussed but you chose not to include in the final merged summary.
+"""
+prompt = """
+@?audience.text
+
+Length: $length.text
+Format: $format.text
+
+Original source:
+@text
+
+Per-chunk summaries (for scaffolding):
+@chunk_summaries
+
+Produce the merged Summary, re-grounding specifics in the original source.
+"""
+
+[pipe.chunk_map_reduce]
+type = "PipeSequence"
+description = "Long-document strategy: chunk the source, summarize each chunk in parallel, merge with source-grounding."
+inputs = { text = "Text", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+steps = [
+  { pipe = "chunk_document", result = "chunks" },
+  { pipe = "summarize_chunk", batch_over = "chunks", batch_as = "chunk", result = "chunk_summaries" },
+  { pipe = "merge_chunk_summaries", result = "draft" },
+]
+
+# ---------------------------------------------------------------------------
+# Pipes — extract_then_write assembled
+# ---------------------------------------------------------------------------
+
+[pipe.extract_then_write]
+type = "PipeSequence"
+description = "General medium-length strategy: extract key facts first, then draft grounded in those facts."
+inputs = { text = "Text", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+steps = [
+  { pipe = "extract_key_facts", result = "facts" },
+  { pipe = "draft_from_key_facts", result = "draft" },
+]
+
+# ---------------------------------------------------------------------------
+# Pipes — Routing
+# ---------------------------------------------------------------------------
+
+[pipe.route_to_strategy]
+type                = "PipeCondition"
+description         = "Route to the summarization strategy the profiler recommended. Each outcome produces a draft Summary."
+inputs              = { profile = "InputProfile", text = "Text", length = "Text", format = "Text", audience = "Text" }
+output              = "Summary"
+expression_template = "{{ profile.recommended_strategy }}"
+default_outcome     = "extract_then_write"
+
+[pipe.route_to_strategy.outcomes]
+single_shot         = "summarize_single_shot"
+promote_preexisting = "enhance_preexisting_summary"
+extract_then_write  = "extract_then_write"
+chunk_map_reduce    = "chunk_map_reduce"
+
+# ---------------------------------------------------------------------------
+# Pipes — Verification
+# ---------------------------------------------------------------------------
+
+[pipe.verify_faithfulness]
+type = "PipeLLM"
+description = "Post-draft verification: check every claim in the draft against the source, identify unsupported claims, and recommend a status adjustment if needed."
+inputs = { draft = "Summary", text = "Text" }
+output = "FaithfulnessReport"
+model = "$writing-factual"
+system_prompt = """
+You are a critical reviewer. Given a summary draft and the original source, check faithfulness claim-by-claim.
+
+Approach:
+1. Decompose the draft summary into individual factual claims.
+2. For each claim, decide whether the source supports it. A claim is supported if it's either stated verbatim in the source or follows from the source without inference beyond what the source permits.
+3. Catalog unsupported_claims (verbatim from the draft).
+4. Separately, check whether the draft MISSES material from the source that belongs in a summary of this length. Those go in missing_key_points.
+5. Recommend status_adjustment:
+   - 'keep' if no unsupported claims and no critical omissions
+   - 'downgrade_to_partial' if there are unsupported claims OR critical omissions
+   - 'flag_low_confidence' if there are minor inferences that are close to but not strictly supported
+   - 'flag_unsafe' if the draft contains fabricated facts that could mislead
+
+Rules:
+- Be strict. Err toward flagging rather than passing.
+- Do not rewrite the draft. Just evaluate it.
+- Preserve verbatim quotes from the draft when listing unsupported_claims.
+"""
+prompt = """
+Source text:
+@text
+
+Draft summary:
+@draft
+
+Evaluate the draft's faithfulness to the source.
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Finalization
+# ---------------------------------------------------------------------------
+
+[pipe.finalize_summary]
+type = "PipeLLM"
+description = "Apply the faithfulness report to the draft: adjust confidence and status, remove unsupported claims, and produce the final Summary."
+inputs = { draft = "Summary", faithfulness_report = "FaithfulnessReport", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+model = "$writing-factual"
+system_prompt = """
+You are producing the final Summary by applying a faithfulness report to a draft.
+
+Approach:
+1. Start from the draft.
+2. Remove every claim listed in unsupported_claims from the draft's summary field.
+3. Apply the status_adjustment from the report:
+   - 'keep' → keep draft's status
+   - 'downgrade_to_partial' → status = 'partial'
+   - 'flag_low_confidence' → keep status but lower confidence by one step
+   - 'flag_unsafe' → status = 'unsafe_to_summarize', summary = a minimal neutral statement explaining the problem
+4. Add any missing_key_points from the report into key_points if they're material and fit the length budget.
+5. Ensure preserved_entities is populated from the final summary text.
+6. Ensure uncovered_aspects honestly reflects what was omitted (from the draft + anything removed during finalization).
+7. Honor the requested length and format in the final text.
+
+Rules:
+- Do not add new claims. Only remove or restructure.
+- Keep the draft's strategy_used field — never change it here.
+- Compute length_words from the actual final summary text.
+"""
+prompt = """
+@?audience.text
+
+Length: $length.text
+Format: $format.text
+
+Draft summary:
+@draft
+
+Faithfulness report:
+@faithfulness_report
+
+Produce the final Summary.
+"""
+
+# ---------------------------------------------------------------------------
+# Pipes — Main Pipeline
+# ---------------------------------------------------------------------------
+
+[pipe.summarize]
+type = "PipeSequence"
+description = "End-to-end summarization: profile the input, route to an appropriate strategy, verify faithfulness, and finalize. Produces a faithful, length-controlled Summary with explicit accountability for what was preserved and what was omitted."
+inputs = { text = "Text", length = "Text", format = "Text", audience = "Text" }
+output = "Summary"
+steps = [
+  { pipe = "profile_input", result = "profile" },
+  { pipe = "route_to_strategy", result = "draft" },
+  { pipe = "verify_faithfulness", result = "faithfulness_report" },
+  { pipe = "finalize_summary", result = "summary" },
+]

@@ -25,6 +25,7 @@ eval = [
   "pyarrow",
   "pipelex==0.24.0",
   "typer>=0.12",
+  "datasets>=3.0",
 ]
 dev = [
   "ruff>=0.6.8",
